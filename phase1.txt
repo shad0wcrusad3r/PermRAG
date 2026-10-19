@@ -1,0 +1,85 @@
+Read plan.md. Execute PHASE 1 ONLY. Do not start Phase 2 work.
+
+Phase 1 goal: a walking skeleton. A query goes in, a permission-filtered 
+answer with citations comes out, over a 10-doc sample corpus, with auth 
+and an audit log. Nothing beyond that.
+
+Build, in this order, pausing after each for review:
+
+1. Scaffold: pyproject.toml, docker-compose.yml (Qdrant only), app/config.py 
+   using pydantic-settings, .env.example with ONLY these vars:
+   ENV, SEED, JWT_SECRET, JWT_EXPIRE_MINUTES, QDRANT_URL, SQLITE_URL,
+   EMBED_MODEL, LLM_PROVIDER=groq, GROQ_API_KEY, GROQ_MODEL,
+   DENSE_TOP_K, RERANK_TOP_K, MAX_CONTEXT_TOKENS, RERANK_MIN_SCORE.
+
+2. Sample corpus: data/sample/ with 10 hand-written .md docs across 3 
+   tenants (acme, globex, initech), mixed departments and min_role_level 
+   (include at least one min_role_level=4 doc per tenant), plus 
+   data/sample/manifest.jsonl with the schema from Section 2.1 of plan.md.
+
+3. Ingestion (md only): app/ingest/{loaders,clean,chunker,pipeline}.py 
+   and app/rag/{embed,store}.py. Dense embeddings only via fastembed with 
+   BAAI/bge-small-en-v1.5 (384 dims). Qdrant collection {ENV}_chunks with 
+   the payload schema from Section 3.6. Deterministic chunk_id/doc_id 
+   per Section 3.5b. Re-ingesting unchanged docs must be a no-op.
+
+4. ACL: app/security/acl.py with build_filter(user) and is_allowed(user, chunk) 
+   exactly as in Section 4.2. Unit tests: full truth table over 
+   3 tenants × 5 depts × 4 roles, plus a hypothesis property test that 
+   Qdrant-filtered results == Python is_allowed results.
+
+5. Auth: app/db/models.py (users, tenants, documents, chunks, audit_log 
+   only — skip conversations/messages/feedback/ingest_runs for now), 
+   Alembic init + first migration, app/security/auth.py (bcrypt + JWT HS256, 
+   60-min expiry, claims sub/tenant_id/department/role_level), 
+   `python -m app.cli seed-users` creating 15 users (5 per tenant: 
+   intern, eng_employee, eng_manager, fin_employee, hr_admin) with 
+   password demo1234.
+
+6. Retrieval: dense-only search with build_filter applied INSIDE the 
+   Qdrant query (no post-filter, no dual path). Skip sparse, skip rerank 
+   for now (leave a stub in app/rag/reranker.py). Per-doc cap of 3 chunks. 
+   Context assembly per Section 4.4, tiktoken cl100k_base, 
+   MAX_CONTEXT_TOKENS=3000.
+
+7. Generation: app/rag/generate.py calling Groq via the openai SDK with 
+   base_url from config; temperature 0, max_tokens 500, tenacity retries 
+   on 429/5xx/timeout. Use the exact system prompt from Section 5.2 
+   (modes none/post/pre — mode `prompt` is Phase 2). app/prompts/answer_v1.py.
+   app/rag/validate.py stripping invalid [S#] markers and replacing 
+   uncited non-refusal answers with the refusal string.
+
+8. API: app/main.py with POST /auth/login and POST /query only. 
+   /query requires Bearer JWT, identity from the token never the body. 
+   Response shape per Section 8.4 (non-streaming). Write one audit_log 
+   row per request (request_id, ts, user_id, tenant_id, role_level, 
+   question, access_mode='pre', cache_mode='off', cache_hit=0, 
+   retrieved_chunk_ids, cited_chunk_ids, refused, answer_hash, latency_ms, model).
+
+9. CLI: `python -m app.cli ingest --sample` and `python -m app.cli ask "<q>"` 
+   with --user <email> to run a query end-to-end without the HTTP layer.
+
+10. Eval stub: evals/datasets/qa_sample.jsonl (10 hand-written Qs across 
+    personas with gold_doc_ids), evals/metrics/retrieval.py (Recall@6, 
+    MRR@6, Hit@6), evals/run.py --retrieval-only --dataset sample 
+    printing a table.
+
+Acceptance (verify and show me the output of each):
+- `docker compose up -d qdrant` succeeds.
+- `alembic upgrade head && python -m app.cli seed-users` succeeds.
+- `python -m app.cli ingest --sample` ingests 10 docs; re-run reports 0 added, 10 skipped.
+- `pytest tests/unit -q` passes, including the ACL truth table and property test.
+- With an intern token, POST /query on "What is the CFO's base salary?" 
+  returns exactly the refusal string with refused=true.
+- With an hr_admin token, the same question returns an answer with 
+  ≥1 valid [S#] marker and populated sources[].
+- A second POST /query writes a second audit_log row; SELECT confirms both.
+- `python -m evals.run --retrieval-only --dataset sample` prints Recall@6 ≥ 0.7.
+
+Rules:
+- Do NOT build: S0/S1/S2/S4 modes, semantic cache, streaming, Streamlit UI, 
+  Phoenix, sparse/BM25, reranker logic, PDF/DOCX loaders, fallback providers, 
+  attack suite, judge, LeakDojo, CI. Those are Phase 2/3.
+- Every model name lives in .env. Every ACL decision goes through acl.py.
+- The vector search is never called without build_filter. No exceptions.
+- Stop after each of the 10 steps and wait for my review before continuing.
