@@ -9,6 +9,7 @@ flt = Filter(must=[
     FieldCondition(key="min_role_level", range=Range(lte=4)),
 ])
 
+
 # Try both filtered and unfiltered search
 pts, _ = client.scroll(collection_name=name, scroll_filter=flt, limit=50, with_payload=True)
 print(f"Filtered scroll: {len(pts)} chunks")
