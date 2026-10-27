@@ -14,3 +14,4 @@ pts, _ = client.scroll(collection_name=name, scroll_filter=flt, limit=50, with_p
 print(f"Filtered scroll: {len(pts)} chunks")
 for p in pts[:5]:
     print("  ", p.payload.get("min_role_level"), p.payload.get("department"), p.payload.get("text","")[:50].replace("\n"," "))
+ 
